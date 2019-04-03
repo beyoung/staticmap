@@ -1,11 +1,30 @@
-import itertools
-import time
+import os
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
+
+import itertools
+import requests
+import sys
+import time
+from PIL import Image, ImageDraw
 from math import sqrt, log, tan, pi, cos, ceil, floor, atan, sinh
 
-import requests
-from PIL import Image, ImageDraw
+if sys.version_info[0] < 3:
+    import urlparse
+else:
+    from urllib.parse import urlparse
+
+
+class AssetNotExist(Exception):
+    pass
+
+
+def is_absolute(url):
+    """detect url network or path"""
+    if sys.version_info[0] < 3:
+        return bool(urlparse.urlparse(url).netloc)
+    else:
+        return bool(urlparse(url).netloc)
 
 
 class Line:
@@ -66,7 +85,7 @@ class IconMarker:
         """
         :param coord:  a lon-lat pair, eg (175.0, 0.0)
         :type coord: tuple
-        :param file_path: path to icon
+        :param file_path: path or url to icon
         :type file_path: str
         :param offset_x: x position of the tip of the icon. relative to left bottom, in pixel
         :type offset_x: int
@@ -74,7 +93,17 @@ class IconMarker:
         :type offset_y: int
         """
         self.coord = coord
-        self.img = Image.open(file_path, 'r')
+        if not is_absolute(file_path):
+            if not os.path.exists(file_path):
+                raise FileNotFoundError
+            self.img = Image.open(file_path, 'r')
+        else:
+            res = requests.get(file_path)
+            if res.status_code == requests.status_codes.codes.ok:
+                self.img = Image.open(BytesIO(res.content))
+            else:
+                raise AssetNotExist
+
         self.offset = (offset_x, offset_y)
 
     @property
@@ -118,7 +147,7 @@ class Polygon:
         )
 
 
-def _lon_to_x(lon, zoom):
+def lon_to_x(lon, zoom):
     """
     transform longitude to tile number
     :type lon: float
@@ -131,7 +160,7 @@ def _lon_to_x(lon, zoom):
     return ((lon + 180.) / 360) * pow(2, zoom)
 
 
-def _lat_to_y(lat, zoom):
+def lat_to_y(lat, zoom):
     """
     transform latitude to tile number
     :type lat: float
@@ -144,11 +173,11 @@ def _lat_to_y(lat, zoom):
     return (1 - log(tan(lat * pi / 180) + 1 / cos(lat * pi / 180)) / pi) / 2 * pow(2, zoom)
 
 
-def _y_to_lat(y, zoom):
+def y_to_lat(y, zoom):
     return atan(sinh(pi * (1 - 2 * y / pow(2, zoom)))) / pi * 180
 
 
-def _x_to_lon(x, zoom):
+def x_to_lon(x, zoom):
     return x / pow(2, zoom) * 360.0 - 180.0
 
 
@@ -179,7 +208,9 @@ def _simplify(points, tolerance=11):
 
 
 class StaticMap:
-    def __init__(self, width, height, padding_x=0, padding_y=0, url_template="http://a.tile.komoot.de/komoot-2/{z}/{x}/{y}.png", tile_size=256, tile_request_timeout=None, headers=None, reverse_y=False, background_color="#fff",
+    def __init__(self, width, height, padding_x=0, padding_y=0,
+                 url_template="http://a.tile.komoot.de/komoot-2/{z}/{x}/{y}.png", tile_size=256,
+                 tile_request_timeout=None, headers=None, reverse_y=False, background_color="#fff",
                  delay_between_retries=0):
         """
         :param width: map width in pixel
@@ -269,16 +300,16 @@ class StaticMap:
             self.zoom = zoom
 
         if center:
-            self.x_center = _lon_to_x(center[0], self.zoom)
-            self.y_center = _lat_to_y(center[1], self.zoom)
+            self.x_center = lon_to_x(center[0], self.zoom)
+            self.y_center = lat_to_y(center[1], self.zoom)
         else:
             # get extent of all lines
             extent = self.determine_extent(zoom=self.zoom)
 
             # calculate center point of map
             lon_center, lat_center = (extent[0] + extent[2]) / 2, (extent[1] + extent[3]) / 2
-            self.x_center = _lon_to_x(lon_center, self.zoom)
-            self.y_center = _lat_to_y(lat_center, self.zoom)
+            self.x_center = lon_to_x(lon_center, self.zoom)
+            self.y_center = lat_to_y(lat_center, self.zoom)
 
         image = Image.new('RGB', (self.width, self.height), self.background_color)
 
@@ -308,14 +339,14 @@ class StaticMap:
             # consider dimension of marker
             e_px = m.extent_px
 
-            x = _lon_to_x(e[0], zoom)
-            y = _lat_to_y(e[1], zoom)
+            x = lon_to_x(e[0], zoom)
+            y = lat_to_y(e[1], zoom)
 
             extents += [(
-                _x_to_lon(x - float(e_px[0]) / self.tile_size, zoom),
-                _y_to_lat(y + float(e_px[1]) / self.tile_size, zoom),
-                _x_to_lon(x + float(e_px[2]) / self.tile_size, zoom),
-                _y_to_lat(y - float(e_px[3]) / self.tile_size, zoom)
+                x_to_lon(x - float(e_px[0]) / self.tile_size, zoom),
+                y_to_lat(y + float(e_px[1]) / self.tile_size, zoom),
+                x_to_lon(x + float(e_px[2]) / self.tile_size, zoom),
+                y_to_lat(y - float(e_px[3]) / self.tile_size, zoom)
             )]
 
         extents += [p.extent for p in self.polygons]
@@ -340,11 +371,11 @@ class StaticMap:
         for z in range(17, -1, -1):
             extent = self.determine_extent(zoom=z)
 
-            width = (_lon_to_x(extent[2], z) - _lon_to_x(extent[0], z)) * self.tile_size
+            width = (lon_to_x(extent[2], z) - lon_to_x(extent[0], z)) * self.tile_size
             if width > (self.width - self.padding[0] * 2):
                 continue
 
-            height = (_lat_to_y(extent[1], z) - _lat_to_y(extent[3], z)) * self.tile_size
+            height = (lat_to_y(extent[1], z) - lat_to_y(extent[3], z)) * self.tile_size
             if height > (self.height - self.padding[1] * 2):
                 continue
 
@@ -412,7 +443,8 @@ class StaticMap:
                 raise RuntimeError("could not download {} tiles: {}".format(len(tiles), tiles))
 
             failed_tiles = []
-            futures = [thread_pool.submit(requests.get, tile[2], timeout=self.request_timeout, headers=self.headers) for tile in tiles]
+            futures = [thread_pool.submit(requests.get, tile[2], timeout=self.request_timeout, headers=self.headers) for
+                       tile in tiles]
 
             for tile, future in zip(tiles, futures):
                 x, y, url = tile
@@ -451,8 +483,8 @@ class StaticMap:
 
         for line in self.lines:
             points = [(
-                self._x_to_px(_lon_to_x(coord[0], self.zoom)) * 2,
-                self._y_to_px(_lat_to_y(coord[1], self.zoom)) * 2,
+                self._x_to_px(lon_to_x(coord[0], self.zoom)) * 2,
+                self._y_to_px(lat_to_y(coord[1], self.zoom)) * 2,
             ) for coord in line.coords]
 
             if line.simplify:
@@ -471,8 +503,8 @@ class StaticMap:
 
         for circle in filter(lambda m: isinstance(m, CircleMarker), self.markers):
             point = [
-                self._x_to_px(_lon_to_x(circle.coord[0], self.zoom)) * 2,
-                self._y_to_px(_lat_to_y(circle.coord[1], self.zoom)) * 2
+                self._x_to_px(lon_to_x(circle.coord[0], self.zoom)) * 2,
+                self._y_to_px(lat_to_y(circle.coord[1], self.zoom)) * 2
             ]
             draw.ellipse((
                 point[0] - circle.width,
@@ -483,8 +515,8 @@ class StaticMap:
 
         for polygon in self.polygons:
             points = [(
-                self._x_to_px(_lon_to_x(coord[0], self.zoom)) * 2,
-                self._y_to_px(_lat_to_y(coord[1], self.zoom)) * 2,
+                self._x_to_px(lon_to_x(coord[0], self.zoom)) * 2,
+                self._y_to_px(lat_to_y(coord[1], self.zoom)) * 2,
 
             ) for coord in polygon.coords]
             if polygon.simplify:
@@ -501,8 +533,8 @@ class StaticMap:
         # add icon marker
         for icon in filter(lambda m: isinstance(m, IconMarker), self.markers):
             position = (
-                self._x_to_px(_lon_to_x(icon.coord[0], self.zoom)) - icon.offset[0],
-                self._y_to_px(_lat_to_y(icon.coord[1], self.zoom)) - icon.offset[1]
+                self._x_to_px(lon_to_x(icon.coord[0], self.zoom)) - icon.offset[0],
+                self._y_to_px(lat_to_y(icon.coord[1], self.zoom)) - icon.offset[1]
             )
             image.paste(icon.img, position, icon.img)
 
