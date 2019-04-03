@@ -8,6 +8,7 @@ python:
   - "nightly"
 
 install:
+  - pip install --upgrade setuptools
   - pip install -r requirements.txt
 
 script: python staticmap/tests.py
